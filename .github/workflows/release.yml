@@ -1,0 +1,45 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build release app
+        run: |
+          swift build -c release
+          mkdir -p dist/MacPilot.app/Contents/MacOS
+          cp .build/release/MacPilot dist/MacPilot.app/Contents/MacOS/MacPilot
+          cat > dist/MacPilot.app/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key><string>MacPilot</string>
+            <key>CFBundleExecutable</key><string>MacPilot</string>
+            <key>CFBundleIdentifier</key><string>com.macpilot.app</string>
+            <key>CFBundleName</key><string>MacPilot</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
+            <key>CFBundleVersion</key><string>${GITHUB_RUN_NUMBER}</string>
+            <key>LSMinimumSystemVersion</key><string>14.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          ditto -c -k --sequesterRsrc --keepParent dist/MacPilot.app MacPilot.zip
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: MacPilot.zip
