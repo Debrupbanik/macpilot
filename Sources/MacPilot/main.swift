@@ -4,6 +4,7 @@ import Darwin
 import Observation
 
 @main
+@MainActor
 struct MacPilotApp: App {
     @State private var model = SystemModel()
 
@@ -41,7 +42,7 @@ final class SystemModel {
     init() {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor [weak self] in self?.refresh() }
         }
     }
 
@@ -100,6 +101,7 @@ final class SystemModel {
     }
 }
 
+@MainActor
 struct DashboardView: View {
     @Bindable var model: SystemModel
     @State private var isCleaning = false
@@ -134,6 +136,7 @@ struct DashboardView: View {
     }
 }
 
+@MainActor
 struct Sidebar: View {
     @Bindable var model: SystemModel
     var body: some View {
@@ -160,6 +163,7 @@ struct Sidebar: View {
     }
 }
 
+@MainActor
 struct Header: View {
     let model: SystemModel
     var body: some View {
@@ -183,6 +187,7 @@ struct MetricCard: View {
     }
 }
 
+@MainActor
 struct WindowPanel: View {
     @Bindable var model: SystemModel
     var body: some View {
@@ -195,6 +200,7 @@ struct WindowPanel: View {
     }
 }
 
+@MainActor
 struct StoragePanel: View {
     let model: SystemModel
     @Binding var isCleaning: Bool
