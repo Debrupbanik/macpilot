@@ -132,6 +132,8 @@ final class SystemModel {
     var gpuDetail = "macOS does not expose GPU utilization through a public API"
     var spaces = ["Main", "Work", "Play", "Chat"]
     var selectedSpace = "Main"
+    var scanResults: [CleanupCandidate] = []
+    var isScanning = false
 
     private var timer: Timer?
     private var previousCPU = host_cpu_load_info_data_t()
@@ -161,6 +163,50 @@ final class SystemModel {
 
     func formatBytes(_ value: Double) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file)
+    }
+
+    func scanForReclaimableSpace() {
+        isScanning = true
+        let fileManager = FileManager.default
+        var results: [CleanupCandidate] = []
+        let home = NSHomeDirectory()
+        let locations = [
+            ("Caches", "\(home)/Library/Caches"),
+            ("Logs", "\(home)/Library/Logs")
+        ]
+
+        for (category, path) in locations {
+            let size = folderSize(at: path, fileManager: fileManager)
+            if size > 0 {
+                results.append(CleanupCandidate(name: category, location: path, size: size, category: category))
+            }
+        }
+
+        let downloads = "\(home)/Downloads"
+        if let files = fileManager.enumerator(at: URL(fileURLWithPath: downloads), includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) {
+            for case let fileURL as URL in files {
+                guard ["dmg", "pkg", "zip"].contains(fileURL.pathExtension.lowercased()),
+                      let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                      values.isRegularFile == true,
+                      let modified = values.contentModificationDate,
+                      Date().timeIntervalSince(modified) > 30 * 24 * 60 * 60,
+                      let size = values.fileSize else { continue }
+                results.append(CleanupCandidate(name: fileURL.lastPathComponent, location: fileURL.path, size: Double(size), category: "Old installers"))
+            }
+        }
+
+        scanResults = results.sorted { $0.size > $1.size }
+        isScanning = false
+    }
+
+    private func folderSize(at path: String, fileManager: FileManager) -> Double {
+        guard let files = fileManager.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return 0 }
+        var total = 0.0
+        for case let fileURL as URL in files {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true, let size = values.fileSize else { continue }
+            total += Double(size)
+        }
+        return total
     }
 
     private func readFreeMemory() -> UInt64 {
@@ -303,18 +349,88 @@ struct StoragePanel: View {
     @Binding var isCleaning: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PanelTitle(title: "Storage health", action: "Scan", icon: "externaldrive")
+            PanelTitle(title: "Storage health", action: "Scan", icon: "externaldrive") { isCleaning = true }
             HStack(alignment: .lastTextBaseline) { Text(model.formatBytes(model.diskUsed)).font(.system(size: 28, weight: .semibold, design: .rounded)); Text("used").foregroundStyle(.secondary); Spacer(); Text("\(Int(model.diskUsed / max(1, model.diskTotal) * 100))%").font(.system(size: 13, design: .monospaced)).foregroundStyle(Color.amber) }
             GeometryReader { proxy in ZStack(alignment: .leading) { Capsule().fill(Color.white.opacity(0.08)); Capsule().fill(LinearGradient(colors: [.amber, .coral], startPoint: .leading, endPoint: .trailing)).frame(width: proxy.size.width * min(1, model.diskUsed / max(1, model.diskTotal))) } }.frame(height: 9)
             HStack { StorageLegend(color: .amber, title: "System", value: "142 GB"); Spacer(); StorageLegend(color: .sky, title: "Documents", value: "86 GB"); Spacer(); StorageLegend(color: .secondary, title: "Free", value: model.formatBytes(model.diskFree)) }
             Button { isCleaning = true } label: { Label("Find space to reclaim", systemImage: "wand.and.stars") }.buttonStyle(.borderedProminent).tint(Color.mint).foregroundStyle(.black).frame(maxWidth: .infinity)
-        }.padding(22).frame(width: 360, alignment: .leading).background(Color.panel).clipShape(RoundedRectangle(cornerRadius: 14)).sheet(isPresented: $isCleaning) { CleaningSheet() }
+        }.padding(22).frame(width: 360, alignment: .leading).background(Color.panel).clipShape(RoundedRectangle(cornerRadius: 14)).sheet(isPresented: $isCleaning) { CleaningSheet(model: model) }
     }
 }
 
-struct CleaningSheet: View { @Environment(\.dismiss) private var dismiss; var body: some View { VStack(spacing: 18) { Image(systemName: "sparkles").font(.system(size: 34)).foregroundStyle(Color.mint); Text("Ready to scan").font(.title2.bold()); Text("MacPilot will look for caches, logs, and old installers. Nothing is removed without your review.").multilineTextAlignment(.center).foregroundStyle(.secondary); Button("Start scan") { dismiss() }.buttonStyle(.borderedProminent).tint(.mint).foregroundStyle(.black) }.padding(38).frame(width: 380) } }
+@MainActor
+struct CleaningSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: SystemModel
 
-struct PanelTitle: View { let title: String; let action: String; let icon: String; var body: some View { HStack { Label(title, systemImage: icon).font(.system(size: 15, weight: .semibold, design: .rounded)); Spacer(); Button(action) {}.buttonStyle(.borderless).foregroundStyle(Color.mint).font(.system(size: 12, weight: .medium)) } } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Image(systemName: model.isScanning ? "arrow.triangle.2.circlepath" : "sparkles")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.mint)
+                VStack(alignment: .leading) {
+                    Text(model.scanResults.isEmpty ? "Find reclaimable space" : "Scan complete")
+                        .font(.title3.bold())
+                    Text("Read-only scan · nothing is removed")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.scanResults.isEmpty && !model.isScanning {
+                Text("MacPilot checks user caches, logs, and installer files older than 30 days.")
+                    .foregroundStyle(.secondary)
+            } else if model.isScanning {
+                ProgressView("Scanning your home folder...")
+            } else {
+                let total = model.scanResults.reduce(0) { $0 + $1.size }
+                Text("Found \(model.formatBytes(total)) that can be reviewed.")
+                    .font(.system(size: 14, weight: .medium))
+                ForEach(model.scanResults) { result in
+                    HStack {
+                        Image(systemName: result.category == "Old installers" ? "shippingbox" : "folder")
+                            .foregroundStyle(Color.amber)
+                        VStack(alignment: .leading) {
+                            Text(result.name).font(.system(size: 13, weight: .medium))
+                            Text(result.category).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(model.formatBytes(result.size)).font(.system(size: 11, design: .monospaced))
+                        Button { NSWorkspace.shared.selectFile(result.location, inFileViewerRootedAtPath: "") } label: {
+                            Image(systemName: "arrow.up.forward.square")
+                        }.buttonStyle(.borderless).help("Reveal in Finder")
+                    }
+                }
+            }
+
+            HStack {
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                if !model.isScanning {
+                    Button(model.scanResults.isEmpty ? "Start scan" : "Scan again") {
+                        model.scanForReclaimableSpace()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.mint)
+                    .foregroundStyle(.black)
+                }
+            }
+        }
+        .padding(28)
+        .frame(width: 500)
+    }
+}
+
+struct CleanupCandidate: Identifiable {
+    let id = UUID()
+    let name: String
+    let location: String
+    let size: Double
+    let category: String
+}
+
+struct PanelTitle: View { let title: String; let action: String; let icon: String; let onAction: () -> Void; init(title: String, action: String, icon: String, onAction: @escaping () -> Void = {}) { self.title = title; self.action = action; self.icon = icon; self.onAction = onAction }; var body: some View { HStack { Label(title, systemImage: icon).font(.system(size: 15, weight: .semibold, design: .rounded)); Spacer(); Button(action, action: onAction).buttonStyle(.borderless).foregroundStyle(Color.mint).font(.system(size: 12, weight: .medium)) } } }
 struct WindowRow: View { let name: String; let detail: String; let color: Color; let shortcut: String; var body: some View { HStack { RoundedRectangle(cornerRadius: 5).fill(color).frame(width: 8, height: 28); VStack(alignment: .leading) { Text(name).font(.system(size: 13, weight: .medium)); Text(detail).font(.system(size: 11)).foregroundStyle(.secondary) }; Spacer(); Text(shortcut).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary) }.padding(11).background(Color.white.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 8)) } }
 struct StorageLegend: View { let color: Color; let title: String; let value: String; var body: some View { VStack(alignment: .leading, spacing: 4) { HStack { Circle().fill(color).frame(width: 6, height: 6); Text(title).font(.system(size: 11)).foregroundStyle(.secondary) }; Text(value).font(.system(size: 12, design: .monospaced)) } } }
 struct NavItem: View { let icon: String; let title: String; let selected: Bool; var body: some View { HStack(spacing: 12) { Image(systemName: icon).frame(width: 18); Text(title); Spacer() }.font(.system(size: 13, weight: selected ? .semibold : .regular)).foregroundStyle(selected ? .white : .secondary).padding(.vertical, 10).padding(.horizontal, 10).background(selected ? Color.white.opacity(0.08) : .clear).clipShape(RoundedRectangle(cornerRadius: 7)) } }
