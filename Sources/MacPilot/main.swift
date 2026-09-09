@@ -18,6 +18,103 @@ struct MacPilotApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
+
+        MenuBarExtra {
+            MenuBarWidget(model: model)
+                .frame(width: 320)
+                .preferredColorScheme(.dark)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "waveform.path.ecg")
+                Text("CPU \(Int(model.cpuUsage))%")
+                Text("MEM \(Int(model.memoryUsed / max(1, model.memoryTotal) * 100))%")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+@MainActor
+struct MenuBarWidget: View {
+    @Bindable var model: SystemModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("MACPILOT", systemImage: "waveform.path.ecg")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                Spacer()
+                Circle()
+                    .fill(Color.mint)
+                    .frame(width: 7, height: 7)
+                Text("LIVE")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                TopbarMetric(title: "CPU", value: "\(Int(model.cpuUsage))%", tint: .mint, progress: model.cpuUsage / 100)
+                TopbarMetric(title: "MEM", value: "\(Int(model.memoryUsed / max(1, model.memoryTotal) * 100))%", tint: .sky, progress: model.memoryUsed / max(1, model.memoryTotal))
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Storage", systemImage: "externaldrive")
+                    Spacer()
+                    Text("\(Int(model.diskUsed / max(1, model.diskTotal) * 100))%")
+                        .foregroundStyle(Color.amber)
+                }
+                ProgressView(value: model.diskUsed / max(1, model.diskTotal))
+                    .tint(Color.amber)
+                Text("\(model.formatBytes(model.diskFree)) free")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button { NSApp.activate(ignoringOtherApps: true) } label: {
+                    Label("Open dashboard", systemImage: "rectangle.inset.filled")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.mint)
+                .foregroundStyle(.black)
+
+                Button { NSApplication.shared.terminate(nil) } label: {
+                    Image(systemName: "power")
+                }
+                .buttonStyle(.borderless)
+                .help("Quit MacPilot")
+            }
+        }
+        .padding(18)
+        .background(Color.canvas)
+    }
+}
+
+struct TopbarMetric: View {
+    let title: String
+    let value: String
+    let tint: Color
+    let progress: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+            ProgressView(value: progress)
+                .tint(tint)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
     }
 }
 
