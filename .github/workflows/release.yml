@@ -43,3 +43,25 @@ jobs:
         with:
           generate_release_notes: true
           files: MacPilot.zip
+
+  linux-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v2
+
+      - name: Build Linux release
+        run: swift build -c release
+
+      - name: Package Linux binary
+        run: tar -czf MacPilot-linux.tar.gz -C .build/release MacPilot
+
+      - name: Publish Linux release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MacPilot-linux.tar.gz

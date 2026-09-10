@@ -1,6 +1,6 @@
 # MacPilot
 
-A native macOS dashboard for CPU, memory, storage, window management, and cleanup workflows.
+A native macOS dashboard for CPU, memory, storage, window management, and cleanup workflows, with a Linux terminal edition.
 
 ## Current status
 
@@ -19,6 +19,16 @@ git clone https://github.com/YOUR-USERNAME/macpilot.git
 cd macpilot
 swift run
 ```
+
+### Linux
+
+Linux builds provide a terminal dashboard with CPU load, memory, and root-disk usage:
+
+```sh
+swift run MacPilot
+```
+
+The Linux edition reads standard `/proc` metrics and works without third-party packages. Window arrangement remains desktop-session-specific: use your Wayland compositor's tiling features, or install `wmctrl` for an X11 workflow.
 
 The repository builds as a Swift Package. Open the package in Xcode to run it as a normal macOS app and configure signing.
 

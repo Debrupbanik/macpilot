@@ -1,5 +1,7 @@
+#if os(macOS)
 import SwiftUI
 import AppKit
+import ApplicationServices
 import Darwin
 import Observation
 
@@ -134,12 +136,15 @@ final class SystemModel {
     var selectedSpace = "Main"
     var scanResults: [CleanupCandidate] = []
     var isScanning = false
+    var windows: [ManagedWindow] = []
+    var windowMessage = "Loading windows..."
 
     private var timer: Timer?
     private var previousCPU = host_cpu_load_info_data_t()
 
     init() {
         refresh()
+        refreshWindows()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -159,6 +164,74 @@ final class SystemModel {
             diskUsed = max(0, diskTotal - diskFree)
         }
         lastUpdated = Date()
+    }
+
+    func refreshWindows() {
+        guard AXIsProcessTrusted() else {
+            windows = []
+            windowMessage = "Accessibility permission required"
+            return
+        }
+
+        var discovered: [ManagedWindow] = []
+        for application in NSWorkspace.shared.runningApplications where application.activationPolicy == .regular {
+            guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                  let name = application.localizedName else { continue }
+            let appElement = AXUIElementCreateApplication(application.processIdentifier)
+            guard let windowElements = attributeValue(kAXWindowsAttribute, from: appElement) as? [AXUIElement] else { continue }
+
+            for windowElement in windowElements {
+                let title = (attributeValue(kAXTitleAttribute, from: windowElement) as? String) ?? "Untitled window"
+                discovered.append(ManagedWindow(id: UUID(), appName: name, title: title, element: windowElement))
+            }
+        }
+
+        windows = discovered
+        windowMessage = discovered.isEmpty ? "No manageable windows found" : "\(discovered.count) windows detected"
+    }
+
+    func arrangeWindows() {
+        refreshWindows()
+        guard !windows.isEmpty else { return }
+        guard let screen = NSScreen.main else { return }
+
+        let frame = screen.visibleFrame.insetBy(dx: 24, dy: 24)
+        let columns = max(1, Int(ceil(sqrt(Double(windows.count)))))
+        let rows = Int(ceil(Double(windows.count) / Double(columns)))
+        let cellWidth = frame.width / CGFloat(columns)
+        let cellHeight = frame.height / CGFloat(rows)
+
+        for (index, window) in windows.enumerated() {
+            let column = index % columns
+            let row = index / columns
+            let target = CGRect(
+                x: frame.minX + CGFloat(column) * cellWidth + 8,
+                y: frame.maxY - CGFloat(row + 1) * cellHeight + 8,
+                width: max(240, cellWidth - 16),
+                height: max(180, cellHeight - 16)
+            )
+            setPosition(target.origin, on: window.element)
+            setSize(target.size, on: window.element)
+        }
+        refreshWindows()
+    }
+
+    private func attributeValue(_ attribute: String, from element: AXUIElement) -> AnyObject? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as AnyObject?
+    }
+
+    private func setPosition(_ position: CGPoint, on element: AXUIElement) {
+        var position = position
+        guard let value = AXValueCreate(.cgPoint, &position) else { return }
+        AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
+    }
+
+    private func setSize(_ size: CGSize, on element: AXUIElement) {
+        var size = size
+        guard let value = AXValueCreate(.cgSize, &size) else { return }
+        AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value)
     }
 
     func formatBytes(_ value: Double) -> String {
@@ -310,10 +383,39 @@ struct Sidebar: View {
 struct Header: View {
     let model: SystemModel
     var body: some View {
-        HStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 6) { Text("Good evening.").font(.system(size: 32, weight: .bold, design: .rounded)); Text("Your Mac at a glance.").foregroundStyle(.secondary) }
+        HStack(alignment: .bottom, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SYSTEM OVERVIEW")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.mint)
+                    .tracking(1.6)
+                Text("Good evening.")
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                Text("Your Mac at a glance.")
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
-            HStack(spacing: 10) { Circle().fill(Color.mint).frame(width: 8, height: 8); Text("LIVE").font(.system(size: 11, weight: .bold, design: .monospaced)); Text(model.lastUpdated, style: .time).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary) }.padding(.horizontal, 13).padding(.vertical, 9).background(Color.panel).clipShape(Capsule())
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    Circle().fill(Color.mint).frame(width: 7, height: 7)
+                    Text("LIVE").font(.system(size: 11, weight: .bold, design: .monospaced))
+                    Text(model.lastUpdated, style: .time)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .background(Color.panel)
+                .clipShape(Capsule())
+
+                Button { model.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.mint)
+                .help("Refresh system metrics")
+            }
         }
     }
 }
@@ -326,7 +428,19 @@ struct MetricCard: View {
             Text(value).font(.system(size: 28, weight: .semibold, design: .rounded))
             HStack { Text(caption).font(.system(size: 12)).foregroundStyle(.secondary); Spacer(); if let progress { Text("\(Int(progress * 100))%").font(.system(size: 11, design: .monospaced)).foregroundStyle(tint) } }
             if let progress { ProgressView(value: progress).tint(tint).scaleEffect(x: 1, y: 0.7, anchor: .center) }
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading).background(Color.panel).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06))).clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.panel)
+        .overlay(alignment: .topTrailing) {
+            Circle()
+                .fill(tint.opacity(0.12))
+                .frame(width: 90, height: 90)
+                .blur(radius: 2)
+                .offset(x: 28, y: -32)
+        }
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06)))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -335,11 +449,40 @@ struct WindowPanel: View {
     @Bindable var model: SystemModel
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PanelTitle(title: "Window manager", action: "Arrange all", icon: "square.grid.2x2")
+            PanelTitle(title: "Window manager", action: "Arrange all", icon: "square.grid.2x2") { model.arrangeWindows() }
             Text("A calm place for every window.").foregroundStyle(.secondary).font(.system(size: 13))
-            VStack(spacing: 8) { WindowRow(name: "MacPilot", detail: "Dashboard", color: .mint, shortcut: "⌘ 1"); WindowRow(name: "Safari", detail: "Documentation", color: .sky, shortcut: "⌘ 2"); WindowRow(name: "Terminal", detail: "zsh", color: .amber, shortcut: "⌘ 3") }
-            HStack { Image(systemName: "info.circle").foregroundStyle(.secondary); Text("Window control needs Accessibility permission.").font(.system(size: 11)).foregroundStyle(.secondary); Spacer(); Button("Open Settings") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!) }.buttonStyle(.borderless).foregroundStyle(Color.mint) }
-        }.padding(22).frame(maxWidth: .infinity, alignment: .leading).background(Color.panel).clipShape(RoundedRectangle(cornerRadius: 14))
+            VStack(spacing: 8) {
+                if model.windows.isEmpty {
+                    HStack(spacing: 10) {
+                        Image(systemName: "macwindow.on.rectangle").foregroundStyle(Color.mint)
+                        Text(model.windowMessage).font(.system(size: 12)).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.035))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    ForEach(model.windows) { window in
+                        WindowRow(name: window.appName, detail: window.title, color: .mint, shortcut: "")
+                    }
+                }
+            }
+            HStack {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+                Text(model.windowMessage).font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Open Settings") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Color.mint)
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, minHeight: 282, alignment: .topLeading)
+        .background(Color.panel)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06)))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -354,7 +497,14 @@ struct StoragePanel: View {
             GeometryReader { proxy in ZStack(alignment: .leading) { Capsule().fill(Color.white.opacity(0.08)); Capsule().fill(LinearGradient(colors: [.amber, .coral], startPoint: .leading, endPoint: .trailing)).frame(width: proxy.size.width * min(1, model.diskUsed / max(1, model.diskTotal))) } }.frame(height: 9)
             HStack { StorageLegend(color: .amber, title: "System", value: "142 GB"); Spacer(); StorageLegend(color: .sky, title: "Documents", value: "86 GB"); Spacer(); StorageLegend(color: .secondary, title: "Free", value: model.formatBytes(model.diskFree)) }
             Button { isCleaning = true } label: { Label("Find space to reclaim", systemImage: "wand.and.stars") }.buttonStyle(.borderedProminent).tint(Color.mint).foregroundStyle(.black).frame(maxWidth: .infinity)
-        }.padding(22).frame(width: 360, alignment: .leading).background(Color.panel).clipShape(RoundedRectangle(cornerRadius: 14)).sheet(isPresented: $isCleaning) { CleaningSheet(model: model) }
+        }
+        .padding(22)
+        .frame(width: 360, alignment: .topLeading)
+        .frame(minHeight: 282, alignment: .topLeading)
+        .background(Color.panel)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06)))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .sheet(isPresented: $isCleaning) { CleaningSheet(model: model) }
     }
 }
 
@@ -430,6 +580,13 @@ struct CleanupCandidate: Identifiable {
     let category: String
 }
 
+struct ManagedWindow: Identifiable {
+    let id: UUID
+    let appName: String
+    let title: String
+    let element: AXUIElement
+}
+
 struct PanelTitle: View { let title: String; let action: String; let icon: String; let onAction: () -> Void; init(title: String, action: String, icon: String, onAction: @escaping () -> Void = {}) { self.title = title; self.action = action; self.icon = icon; self.onAction = onAction }; var body: some View { HStack { Label(title, systemImage: icon).font(.system(size: 15, weight: .semibold, design: .rounded)); Spacer(); Button(action, action: onAction).buttonStyle(.borderless).foregroundStyle(Color.mint).font(.system(size: 12, weight: .medium)) } } }
 struct WindowRow: View { let name: String; let detail: String; let color: Color; let shortcut: String; var body: some View { HStack { RoundedRectangle(cornerRadius: 5).fill(color).frame(width: 8, height: 28); VStack(alignment: .leading) { Text(name).font(.system(size: 13, weight: .medium)); Text(detail).font(.system(size: 11)).foregroundStyle(.secondary) }; Spacer(); Text(shortcut).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary) }.padding(11).background(Color.white.opacity(0.035)).clipShape(RoundedRectangle(cornerRadius: 8)) } }
 struct StorageLegend: View { let color: Color; let title: String; let value: String; var body: some View { VStack(alignment: .leading, spacing: 4) { HStack { Circle().fill(color).frame(width: 6, height: 6); Text(title).font(.system(size: 11)).foregroundStyle(.secondary) }; Text(value).font(.system(size: 12, design: .monospaced)) } } }
@@ -437,3 +594,70 @@ struct NavItem: View { let icon: String; let title: String; let selected: Bool; 
 
 extension Text { func labelStyle() -> some View { self.font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(.tertiary).tracking(1.5).padding(.bottom, 8) } }
 extension Color { static let canvas = Color(red: 0.055, green: 0.065, blue: 0.075); static let sidebar = Color(red: 0.075, green: 0.085, blue: 0.095); static let panel = Color(red: 0.105, green: 0.12, blue: 0.13); static let mint = Color(red: 0.39, green: 0.91, blue: 0.69); static let sky = Color(red: 0.42, green: 0.72, blue: 1); static let amber = Color(red: 1, green: 0.72, blue: 0.31); static let coral = Color(red: 1, green: 0.39, blue: 0.35) }
+
+#else
+
+import Foundation
+
+@main
+struct MacPilotLinux {
+    static func main() {
+        print("MacPilot Linux")
+        print(String(repeating: "-", count: 42))
+        print("CPU load:  \(readLoad())")
+        print("Memory:    \(readMemory())")
+        print("Disk:      \(readDisk())")
+        print("")
+        print("Window management")
+        print("Linux window arrangement depends on your desktop session.")
+        print("Use your desktop's tiling features on Wayland, or install wmctrl for X11.")
+        print("")
+        print("Run again with: swift run MacPilot")
+    }
+
+    private static func readLoad() -> String {
+        guard let contents = try? String(contentsOfFile: "/proc/loadavg", encoding: .utf8) else {
+            return "Unavailable"
+        }
+        return contents.split(separator: " ").first.map(String.init) ?? "Unavailable"
+    }
+
+    private static func readMemory() -> String {
+        guard let contents = try? String(contentsOfFile: "/proc/meminfo", encoding: .utf8) else {
+            return "Unavailable"
+        }
+        let values = contents.split(separator: "\n").reduce(into: [String: Int64]()) { result, line in
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == ":" }).filter { !$0.isEmpty }
+            if parts.count >= 2, let value = Int64(parts[1]) {
+                result[String(parts[0])] = value
+            }
+        }
+        guard let total = values["MemTotal"], let available = values["MemAvailable"] else {
+            return "Unavailable"
+        }
+        let used = total - available
+        return "\(formatMegabytes(used)) used / \(formatMegabytes(total)) total"
+    }
+
+    private static func readDisk() -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/df")
+        process.arguments = ["-h", "/"]
+        process.standardOutput = output
+        guard (try? process.run()) != nil else { return "Unavailable" }
+        process.waitUntilExit()
+        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let line = text.split(separator: "\n").last.map(String.init) ?? ""
+        let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard fields.count >= 5 else { return "Unavailable" }
+        return "\(fields[2]) used / \(fields[1]) total (\(fields[4]) free)"
+    }
+
+    private static func formatMegabytes(_ kibibytes: Int64) -> String {
+        let megabytes = Double(kibibytes) / 1024
+        return String(format: "%.0f MB", megabytes)
+    }
+}
+
+#endif
